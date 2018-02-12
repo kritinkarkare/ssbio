@@ -859,7 +859,48 @@ class GEMPRO(Object):
 
         """
         counter = 0
+	
+        for g in tqdm(self.genes_with_a_representative_sequence):
+            # If all_genes=False, BLAST only genes without a uniprot -> pdb mapping
+            if g.protein.num_structures_experimental > 0 and not all_genes and not force_rerun:
+                log.debug('{}: skipping BLAST, {} experimental structures already mapped '
+                          'and all_genes flag is False'.format(g.id,
+                                                               g.protein.num_structures_experimental))
+                continue
 
+            # BLAST the sequence to the PDB
+            new_pdbs = g.protein.blast_representative_sequence_to_pdb(seq_ident_cutoff=seq_ident_cutoff,
+                                                                   evalue=evalue,
+                                                                   display_link=display_link,
+                                                                   outdir=outdir,
+                                                                   force_rerun=force_rerun)
+
+            if new_pdbs:
+                counter += 1
+                log.debug('{}: {} PDBs BLASTed'.format(g.id, len(new_pdbs)))
+            else:
+                log.debug('{}: no BLAST results'.format(g.id))
+
+        log.info('Completed sequence --> PDB BLAST. See the "df_pdb_blast" attribute for a summary dataframe.')
+        log.info('{}: number of genes with additional structures added from BLAST'.format(counter))
+  def blast_seqs_to_pdb_parallelize(self, sc,  seq_ident_cutoff=0, evalue=0.0001, all_genes=False, display_link=False,
+                          outdir=None, force_rerun=False):
+        """BLAST each representative protein sequence to the PDB. Saves raw BLAST results (XML files).
+
+        Args:
+            seq_ident_cutoff (float, optional): Cutoff results based on percent coverage (in decimal form)
+            evalue (float, optional): Cutoff for the E-value - filters for significant hits. 0.001 is liberal,
+                0.0001 is stringent (default).
+            all_genes (bool): If all genes should be BLASTed, or only those without any structures currently mapped
+            display_link (bool, optional): Set to True if links to the HTML results should be displayed
+            outdir (str): Path to output directory of downloaded files, must be set if GEM-PRO directories
+                were not created initially
+            force_rerun (bool, optional): If existing BLAST results should not be used, set to True. Default is False
+
+        """
+        counter = 0
+	genes_rdd = sc.paralleize(self.genes)
+	genes
         for g in tqdm(self.genes_with_a_representative_sequence):
             # If all_genes=False, BLAST only genes without a uniprot -> pdb mapping
             if g.protein.num_structures_experimental > 0 and not all_genes and not force_rerun:
@@ -884,6 +925,7 @@ class GEMPRO(Object):
         log.info('Completed sequence --> PDB BLAST. See the "df_pdb_blast" attribute for a summary dataframe.')
         log.info('{}: number of genes with additional structures added from BLAST'.format(counter))
 
+       
     @property
     def df_pdb_blast(self):
         """DataFrame: Get a dataframe of PDB BLAST results"""
@@ -948,6 +990,60 @@ class GEMPRO(Object):
         log.info('{}/{}: number of genes with at least one experimental structure'.format(len(self.genes_with_experimental_structures),
                                                                                           len(self.genes)))
         log.info('Completed UniProt --> best PDB mapping. See the "df_pdb_ranking" attribute for a summary dataframe.')
+    def map_uniprot_to_pdb_parallelize(self, sc, seq_ident_cutoff=0.0, outdir=None, force_rerun=False):
+        """Map all representative sequences' UniProt ID to PDB IDs using the PDBe "Best Structures" API.
+        Will save a JSON file of the results to each protein's ``sequences`` folder.
+
+        The "Best structures" API is available at https://www.ebi.ac.uk/pdbe/api/doc/sifts.html
+        The list of PDB structures mapping to a UniProt accession sorted by coverage of the protein and,
+        if the same, resolution.
+
+        Args:
+	    sc= SparkContext
+            seq_ident_cutoff (float): Sequence identity cutoff in decimal form
+            outdir (str): Output directory to cache JSON results of search
+            force_rerun (bool): Force re-downloading of JSON results if they already exist
+
+        Returns:
+            list: A rank-ordered list of PDBProp objects that map to the UniProt ID
+
+        """
+	genes.rdd = sc.parallelize(self.genes)
+	def uniprot_to_pdb(g):	
+        # First get all UniProt IDs and check if they have PDBs
+           all_representative_uniprots = []
+           #for g in self.genes_with_a_representative_sequence:
+               uniprot_id = g.protein.representative_sequence.uniprot
+               if uniprot_id:
+                # TODO: add warning or something for isoform ids?
+               if '-' in uniprot_id:
+                    uniprot_id = uniprot_id.split('-')[0]
+                all_representative_uniprots.append(uniprot_id)
+           log.info('Mapping UniProt IDs --> PDB IDs...')
+           uniprots_to_pdbs = bs_unip.mapping(fr='ACC', to='PDB_ID', query=all_representative_uniprots)
+
+           counter = 0
+           # Now run the best_structures API for all genes
+
+          #for g in tqdm(self.genes_with_a_representative_sequence):
+             uniprot_id = g.protein.representative_sequence.uniprot
+             if uniprot_id:
+                if '-' in uniprot_id:
+                    uniprot_id = uniprot_id.split('-')[0]
+                if uniprot_id in uniprots_to_pdbs:
+                    best_structures = g.protein.map_uniprot_to_pdb(seq_ident_cutoff=seq_ident_cutoff, outdir=outdir, force_rerun=force_rerun)
+                    if best_structures:
+                        counter += 1
+                        log.debug('{}: {} PDBs mapped'.format(g.id, len(best_structures)))
+                else:
+                    log.debug('{}, {}: no PDBs available'.format(g.id, uniprot_id))
+	result = genes.rdd.map(uniprot_to_pdb).collect()
+
+        
+log.info('{}/{}: number of genes with at least one experimental structure'.format(len(self.genes_with_experimental_structures),
+                                                                                          len(self.genes)))
+        log.info('Completed UniProt --> best PDB mapping. See the "df_pdb_ranking" attribute for a summary dataframe.')
+
 
     @property
     def df_pdb_ranking(self):
